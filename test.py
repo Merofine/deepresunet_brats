@@ -29,12 +29,13 @@ from torchvision import datasets, models, transforms
 
 from dataset import Dataset
 
-import mymodel
+import deepresunet
 from metrics import dice_coef, batch_iou, mean_iou, iou_score ,ppv,sensitivity
 import losses
 from utils import str2bool, count_params
 from sklearn.externals import joblib
 from hausdorff import hausdorff_distance
+import imageio
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -66,7 +67,7 @@ def main():
 
     # create model
     print("=> creating model %s" %args.arch)
-    model = mymodel.__dict__[args.arch](args)
+    model = deepresunet.__dict__[args.arch](args)
 
     model = model.cuda()
 
@@ -116,6 +117,8 @@ def main():
 
 
                     for i in range(output.shape[0]):
+                        """
+                        生成灰色圖片
                         wtName = os.path.basename(img_paths[i])
                         overNum = wtName.find(".npy")
                         wtName = wtName[0:overNum]
@@ -131,7 +134,27 @@ def main():
                         etName = etName[0:overNum]
                         etName = etName + "_ET" + ".png"
                         imsave('output/%s/'%args.name + etName, (output[i,2,:,:]*255).astype('uint8'))
-
+                        """
+                        npName = os.path.basename(img_paths[i])
+                        overNum = npName.find(".npy")
+                        rgbName = npName[0:overNum]
+                        rgbName = rgbName  + ".png"
+                        rgbPic = np.zeros([160, 160, 3], dtype=np.uint8)
+                        for idx in range(output.shape[2]):
+                            for idy in range(output.shape[3]):
+                                if output[i,0,idx,idy] > 0.5:
+                                    rgbPic[idx, idy, 0] = 0
+                                    rgbPic[idx, idy, 1] = 128
+                                    rgbPic[idx, idy, 2] = 0
+                                if output[i,1,idx,idy] > 0.5:
+                                    rgbPic[idx, idy, 0] = 255
+                                    rgbPic[idx, idy, 1] = 0
+                                    rgbPic[idx, idy, 2] = 0
+                                if output[i,2,idx,idy] > 0.5:
+                                    rgbPic[idx, idy, 0] = 255
+                                    rgbPic[idx, idy, 1] = 255
+                                    rgbPic[idx, idy, 2] = 0
+                        imsave('output/%s/'%args.name + rgbName,rgbPic)
 
             torch.cuda.empty_cache()
         """
@@ -142,6 +165,36 @@ def main():
         if not os.path.exists(val_gt_path):
             os.mkdir(val_gt_path)
         for idx in tqdm(range(len(val_mask_paths))):
+            mask_path = val_mask_paths[idx]
+            name = os.path.basename(mask_path)
+            overNum = name.find(".npy")
+            name = name[0:overNum]
+            rgbName = name + ".png"
+
+            npmask = np.load(mask_path)
+
+            GtColor = np.zeros([npmask.shape[0],npmask.shape[1],3], dtype=np.uint8)
+            for idx in range(npmask.shape[0]):
+                for idy in range(npmask.shape[1]):
+                    #坏疽(NET,non-enhancing tumor)(标签1) 红色
+                    if npmask[idx, idy] == 1:
+                        GtColor[idx, idy, 0] = 255
+                        GtColor[idx, idy, 1] = 0
+                        GtColor[idx, idy, 2] = 0
+                    #浮肿区域(ED,peritumoral edema) (标签2) 绿色
+                    elif npmask[idx, idy] == 2:
+                        GtColor[idx, idy, 0] = 0
+                        GtColor[idx, idy, 1] = 128
+                        GtColor[idx, idy, 2] = 0
+                    #增强肿瘤区域(ET,enhancing tumor)(标签4) 黄色
+                    elif npmask[idx, idy] == 4:
+                        GtColor[idx, idy, 0] = 255
+                        GtColor[idx, idy, 1] = 255
+                        GtColor[idx, idy, 2] = 0
+
+            #imsave(val_gt_path + rgbName, GtColor)
+            imageio.imwrite(val_gt_path + rgbName, GtColor)
+            """
             mask_path = val_mask_paths[idx]
             name = os.path.basename(mask_path)
             overNum = name.find(".npy")
@@ -168,7 +221,10 @@ def main():
             imsave(val_gt_path + wtName, (WT_Label * 255).astype('uint8'))
             imsave(val_gt_path + tcName, (TC_Label * 255).astype('uint8'))
             imsave(val_gt_path + etName, (ET_Label * 255).astype('uint8'))
+            """
         print("Done!")
+
+
 
     if val_args.mode == "Calculate":
         """
@@ -200,60 +256,62 @@ def main():
             print("请先生成图片!")
             return
 
-        for idx in range(len(maskPath)):
-            if maskPath[idx].find("_TC.") != -1:
-                tcMaskList.append(maskPath[idx])
-                tcPbList.append(pbPath[idx])
-            elif maskPath[idx].find("_ET.") != -1:
-                etMaskList.append(maskPath[idx])
-                etPbList.append(pbPath[idx])
-            else:
-                wtMaskList.append(maskPath[idx])
-                wtPbList.append(pbPath[idx])
+        for myi in tqdm(range(len(maskPath))):
+            mask = imread(maskPath[myi])
+            pb = imread(pbPath[myi])
 
-        for idx in tqdm(range(len(wtMaskList))):
-            mask = imread(wtMaskList[idx])
-            pb = imread(wtPbList[idx])
-            mask = mask.astype('float32') / 255
-            pb = pb.astype('float32') / 255
+            wtmaskregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
+            wtpbregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
 
-            dice = dice_coef(pb,mask)
+            tcmaskregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
+            tcpbregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
+
+            etmaskregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
+            etpbregion = np.zeros([mask.shape[0], mask.shape[1]], dtype=np.float32)
+
+            for idx in range(mask.shape[0]):
+                for idy in range(mask.shape[1]):
+                    # 只要这个像素的任何一个通道有值,就代表这个像素不属于前景,即属于WT区域
+                    if mask[idx, idy, :].any() != 0:
+                        wtmaskregion[idx, idy] = 1
+                    if pb[idx, idy, :].any() != 0:
+                        wtpbregion[idx, idy] = 1
+                    # 只要第一个通道是255,即可判断是TC区域,因为红色和黄色的第一个通道都是255,区别于绿色
+                    if mask[idx, idy, 0] == 255:
+                        tcmaskregion[idx, idy] = 1
+                    if pb[idx, idy, 0] == 255:
+                        tcpbregion[idx, idy] = 1
+                    # 只要第二个通道是128,即可判断是ET区域
+                    if mask[idx, idy, 1] == 128:
+                        etmaskregion[idx, idy] = 1
+                    if pb[idx, idy, 1] == 128:
+                        etpbregion[idx, idy] = 1
+            #开始计算WT
+            dice = dice_coef(wtpbregion,wtmaskregion)
             wt_dices.append(dice)
-            ppv_n = ppv(pb,mask)
+            ppv_n = ppv(wtpbregion, wtmaskregion)
             wt_ppvs.append(ppv_n)
-            Hausdorff = hausdorff_distance(mask, pb)
+            Hausdorff = hausdorff_distance(wtmaskregion, wtpbregion)
             wt_Hausdorf.append(Hausdorff)
-            sensitivity_n = sensitivity(pb,mask)
+            sensitivity_n = sensitivity(wtpbregion, wtmaskregion)
             wt_sensitivities.append(sensitivity_n)
-
-        for idx in tqdm(range(len(tcMaskList))):
-            mask = imread(tcMaskList[idx])
-            pb = imread(tcPbList[idx])
-            mask = mask.astype('float32') / 255
-            pb = pb.astype('float32') / 255
-
-            dice = dice_coef(pb,mask)
+            # 开始计算TC
+            dice = dice_coef(tcpbregion, tcmaskregion)
             tc_dices.append(dice)
-            ppv_n = ppv(pb,mask)
+            ppv_n = ppv(tcpbregion, tcmaskregion)
             tc_ppvs.append(ppv_n)
-            Hausdorff = hausdorff_distance(mask, pb)
+            Hausdorff = hausdorff_distance(tcmaskregion, tcpbregion)
             tc_Hausdorf.append(Hausdorff)
-            sensitivity_n = sensitivity(pb, mask)
+            sensitivity_n = sensitivity(tcpbregion, tcmaskregion)
             tc_sensitivities.append(sensitivity_n)
-
-        for idx in tqdm(range(len(etMaskList))):
-            mask = imread(etMaskList[idx])
-            pb = imread(etPbList[idx])
-            mask = mask.astype('float32') / 255
-            pb = pb.astype('float32') / 255
-
-            dice = dice_coef(pb,mask)
+            # 开始计算ET
+            dice = dice_coef(etpbregion, etmaskregion)
             et_dices.append(dice)
-            ppv_n = ppv(pb,mask)
+            ppv_n = ppv(etpbregion, etmaskregion)
             et_ppvs.append(ppv_n)
-            Hausdorff = hausdorff_distance(mask, pb)
+            Hausdorff = hausdorff_distance(etmaskregion, etpbregion)
             et_Hausdorf.append(Hausdorff)
-            sensitivity_n = sensitivity(pb, mask)
+            sensitivity_n = sensitivity(etpbregion, etmaskregion)
             et_sensitivities.append(sensitivity_n)
 
         print('WT Dice: %.4f' % np.mean(wt_dices))
